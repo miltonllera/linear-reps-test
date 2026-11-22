@@ -4,13 +4,12 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 import numpy as np
-import torch
 from torch.utils.data import DataLoader, Subset
-from transformers import AutoImageProcessor, AutoModel
 
-from scripts.analyze_latents import save_results_csv
 from scripts.common import (
     DATASETS,
+    HFVisionEmbedder,
+    get_device,
     load_dataset,
     load_or_compute_embeddings,
 )
@@ -29,38 +28,48 @@ logging.basicConfig(level=logging.INFO)
 _logger = logging.getLogger(__name__)
 
 
-class HFVisionEmbedder:
-    """Wrapper around a HuggingFace vision model exposing `.embed(x)` for `compute_embeddings`."""
-
-    def __init__(self, model_id: str, device: torch.device):
-        self.processor = AutoImageProcessor.from_pretrained(model_id, use_fast=True)
-        self.model = AutoModel.from_pretrained(model_id).to(device)
-        self.model.eval()
-        self.device = device
-
-    def embed(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[1] == 1:
-            x = x.expand(-1, 3, -1, -1)
-        inputs = self.processor(images=x, return_tensors="pt", do_rescale=False).to(self.device)
-        outputs = self.model(**inputs)
-        if getattr(outputs, "pooler_output", None) is not None:
-            return outputs.pooler_output
-        return outputs.last_hidden_state[:, 0]
-
-
-def _get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
 def _try_write_image(fig, path: Path) -> None:
     try:
         fig.write_image(str(path))
     except Exception as exc:
         _logger.warning(f"Could not export static image {path.name}: {exc}")
+
+
+def save_results_csv(output_dir: Path, prefix: str, pca, umap_metrics: dict, factor_names: list[str]) -> None:
+    csv_path = output_dir / f"{prefix}_results.csv"
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+
+        writer.writerow(["PCA Results"])
+        writer.writerow(["Component", "Explained Variance Ratio", "Cumulative Variance"])
+        cumsum = np.cumsum(pca.explained_variance_ratio_)
+        for i, (var, cum) in enumerate(zip(pca.explained_variance_ratio_, cumsum)):
+            writer.writerow([i + 1, var, cum])
+
+        writer.writerow([])
+
+        writer.writerow(["UMAP Metrics"])
+        writer.writerow(["Metric", "Mean", "Variance", "Std"])
+        writer.writerow([
+            "Trustworthiness",
+            umap_metrics["trustworthiness_mean"],
+            umap_metrics["trustworthiness_var"],
+            np.sqrt(umap_metrics["trustworthiness_var"]),
+        ])
+        writer.writerow([
+            "Continuity",
+            umap_metrics["continuity_mean"],
+            umap_metrics["continuity_var"],
+            np.sqrt(umap_metrics["continuity_var"]),
+        ])
+
+        writer.writerow([])
+
+        writer.writerow(["Factor Names"])
+        writer.writerow(factor_names)
+
+    _logger.info(f"Results saved to {csv_path}")
 
 
 def _save_pca_csv(output_dir: Path, prefix: str, pca, factor_names: list[str]) -> None:
@@ -129,7 +138,7 @@ def main(
     else:
         _logger.info(f"Loaded {len(train_dataset)} samples with factors: {factor_names}")
 
-    device = _get_device()
+    device = get_device()
     _logger.info(f"Loading HuggingFace model '{model_id}' on {device}...")
     embedder = HFVisionEmbedder(model_id=model_id, device=device)
 

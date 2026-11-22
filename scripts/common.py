@@ -4,12 +4,10 @@ from PIL import Image
 
 import numpy as np
 import torch
-from transformers import AutoModel, AutoProcessor
+from transformers import AutoImageProcessor, AutoModel, AutoProcessor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.model.vae import BetaVAE, WassersteinMMDAE
-from src.model.slot import SlotAutoencoder, FigureGroundAutoencoder
 from src.dataset.dsprites import DSprites
 from src.dataset.shapes3d import Shapes3D
 from src.dataset.pentominos import Pentominos, Pentominos3D
@@ -30,12 +28,32 @@ DATASETS = {
     'pentominos_3d': (Pentominos3D, str(Path.home() / "Repos/vision/blender stuff/data/temp/pentominos_3d")),
 }
 
-MODEL_TYPES = {
-    'vae': BetaVAE,
-    'wae': WassersteinMMDAE,
-    'sa1': FigureGroundAutoencoder,
-    'sa': SlotAutoencoder,
-}
+
+class HFVisionEmbedder:
+    """Wrapper around a HuggingFace vision model exposing `.embed(x)` for `compute_embeddings`."""
+
+    def __init__(self, model_id: str, device: torch.device):
+        self.processor = AutoImageProcessor.from_pretrained(model_id, use_fast=True)
+        self.model = AutoModel.from_pretrained(model_id).to(device)
+        self.model.eval()
+        self.device = device
+
+    def embed(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] == 1:
+            x = x.expand(-1, 3, -1, -1)
+        inputs = self.processor(images=x, return_tensors="pt", do_rescale=False).to(self.device)
+        outputs = self.model(**inputs)
+        if getattr(outputs, "pooler_output", None) is not None:
+            return outputs.pooler_output
+        return outputs.last_hidden_state[:, 0]
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def compute_embeddings(model, loader, device, progress_callback=None):
@@ -79,14 +97,6 @@ def load_or_compute_embeddings(
     np.savez(embeddings_path, **existing_data)
 
     return embeddings
-
-
-def load_model(model_name: str, checkpoint_path: Path, compile=True):
-    model = MODEL_TYPES[model_name].load_from_checkpoint(checkpoint_path, weights_only=False)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    model.eval()
-    return torch.compile(model), device
 
 
 def _instantiate_dataset(dataset_class, path: str, data_filter=None):

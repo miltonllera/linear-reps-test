@@ -14,8 +14,6 @@ import torch
 
 from scripts.common import (
     DATASETS,
-    MODEL_TYPES,
-    load_model,
     load_dataset,
     compute_embeddings,
     load_or_compute_embeddings,
